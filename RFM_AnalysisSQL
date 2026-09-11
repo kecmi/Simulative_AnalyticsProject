@@ -1,0 +1,70 @@
+--RFM analysis R-recency F-frequency M-monetary
+with RFM_values as (
+	select
+		dr_cdisc::int as client,
+		max(dr_dat) as "R",
+		count(distinct dr_nchk) as "F",
+		round(sum(dr_croz * dr_kol)::numeric, 2) as "M"
+	from sales s
+	where dr_cdisc != 'NULL'
+	group by dr_cdisc
+	order by 4
+),
+stats as (
+	select
+		to_timestamp(avg(extract(epoch from "R")))::date as avg_R,
+		avg("F")::int as avg_F,
+		round(avg("M")::numeric, 2) as avg_M,
+		to_timestamp(percentile_cont(0.33) within group (order by extract(epoch from "R")))::date as firstpart_R,
+		percentile_cont(0.33) within group (order by "F")::int as firstpart_F,
+		percentile_cont(0.33) within group (order by "M") as firstpart_M,
+		to_timestamp(percentile_cont(0.66) within group (order by extract(epoch from "R")))::date as secondpart_R,
+		percentile_cont(0.66) within group (order by "F")::int as secondpart_F,
+		percentile_cont(0.66) within group (order by "M") as secondpart_M
+	from RFM_values
+),
+ABC_analysis as (
+	select
+		client,
+		case
+			when running_sum / overall <= 0.8 then 'A'
+			when running_sum / overall <= 0.95 then 'B'
+			else 'C'
+		end as abc_result
+	from (
+		select
+			client,
+			sum("M") over (order by "M" desc) as running_sum,
+			sum("M") over () as overall
+		from RFM_values
+	) s
+),
+scored as (
+	select
+		rfm.client,
+		"R", "F", "M",
+		case
+			when "R" < (select firstpart_R from stats) then 3
+			when "R" < (select secondpart_R from stats) then 2
+			else 1
+		end as R_group,
+		case
+			when "F" < (select firstpart_F from stats) then 3
+			when "F" < (select secondpart_F from stats) then 2
+			else 1
+		end as F_group,
+		case
+			when abc.abc_result = 'A' then 1
+			when abc.abc_result = 'B' then 2
+			else 3
+		end as M_group
+	from RFM_values rfm
+	join ABC_analysis abc
+		on rfm.client = abc.client
+)
+select
+	client,
+	"R", "F", "M",
+	R_group::text || F_group::text || M_group::text as rfm_segment
+from scored
+order by rfm_segment;
